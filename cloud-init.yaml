@@ -1,0 +1,45 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+packages:
+  - docker.io
+  - jq
+
+write_files:
+  # Move the real SSH server off port 22 so the honeypot can have it
+  - path: /etc/ssh/sshd_config.d/10-admin.conf
+    content: |
+      Port 22222
+      PasswordAuthentication no
+  # Log every new inbound TCP attempt (port scans) to the kernel log, tagged SCAN
+  - path: /usr/local/sbin/scanlog.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      RULE="-p tcp --syn ! --dport 22222 -m limit --limit 20/second -j LOG --log-prefix SCAN: "
+      iptables -C INPUT $RULE 2>/dev/null || iptables -I INPUT 1 $RULE
+  - path: /etc/systemd/system/scanlog.service
+    content: |
+      [Unit]
+      Description=Log inbound connection attempts
+      After=network-online.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/scanlog.sh
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - systemctl daemon-reload
+  - systemctl restart ssh.socket || systemctl restart ssh
+  - systemctl enable --now scanlog.service
+  - systemctl enable --now docker
+  # Cowrie: a fake SSH/Telnet server. Attackers "log in" to an emulated shell;
+  # nothing they type runs on the real system. It records every password and command.
+  - docker volume create cowrie-var
+  - >-
+    docker run -d --name cowrie --restart unless-stopped
+    -p 22:2222 -p 23:2223
+    -e COWRIE_TELNET_ENABLED=yes
+    -v cowrie-var:/cowrie/cowrie-git/var
+    cowrie/cowrie:latest
